@@ -7,7 +7,9 @@ on:
 
 permissions:
   issues: write
-  contents: read
+  contents: write
+  pages: write
+  id-token: write
 
 jobs:
   newsletter:
@@ -15,15 +17,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4.2.2
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v5
 
-      - name: Install dependencies
-        run: pip install requests python-dotenv
-
-      - name: POST newsletter
-        run: python newsletter.py
+      - name: POST newsletter & generate swipe UI
+        run: uv run python newsletter.py
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           DAYS: 7
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist

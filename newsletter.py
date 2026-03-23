@@ -1,6 +1,10 @@
 import os
+import pathlib
 import requests
 from datetime import datetime, timedelta, timezone
+
+from insights import generate_insights
+from template import generate_html
 
 TOKEN = os.getenv("GITHUB_TOKEN")
 DAYS = int(os.getenv("DAYS", 7))
@@ -60,6 +64,30 @@ def get_repo_metadata(repo):
 
     repo_cache[repo] = r.json()
     return repo_cache[repo]
+
+
+readme_cache = {}
+
+def get_repo_readme(repo):
+    """Fetch rendered README HTML for a repo. Returns HTML string or empty string."""
+    if repo in readme_cache:
+        return readme_cache[repo]
+
+    r = requests.get(
+        f"{BASE_URL}/repos/{repo}/readme",
+        headers={**HEADERS, "Accept": "application/vnd.github.html"}
+    )
+
+    if r.status_code != 200:
+        readme_cache[repo] = ""
+        return ""
+
+    html = r.text
+    if len(html) > 50000:
+        html = html[:50000] + "<!-- truncated -->"
+
+    readme_cache[repo] = html
+    return html
 
 
 def get_user_all_stars(username):
@@ -251,6 +279,44 @@ def main():
         f"📰 StarGazer Newsletter — {today}",
         body
     )
+
+    # --- Swipe UI generation ---
+    print("\n--- Generating Swipe UI ---")
+
+    # Build repo data for the swipe page (all unique repos from network stars)
+    swipe_repos = []
+    for repo_name, users in repo_star_count.items():
+        meta = get_repo_metadata(repo_name)
+        if not meta:
+            continue
+
+        print(f"  Fetching README: {repo_name}")
+        readme_html = get_repo_readme(repo_name)
+
+        swipe_repos.append({
+            "name": repo_name,
+            "description": meta.get("description") or "",
+            "topics": (meta.get("topics") or [])[:3],
+            "stars": meta.get("stargazers_count", 0),
+            "network_users": users,
+            "readme_html": readme_html,
+            "insight": None,  # filled in next step
+        })
+
+    # Generate insights (DeepWiki → LLM → none)
+    if swipe_repos:
+        print(f"\n  Generating insights for {len(swipe_repos)} repos...")
+        insights = generate_insights(swipe_repos)
+        for repo in swipe_repos:
+            repo["insight"] = insights.get(repo["name"])
+
+    # Write dist/index.html
+    dist_dir = pathlib.Path("dist")
+    dist_dir.mkdir(exist_ok=True)
+
+    html = generate_html(swipe_repos)
+    (dist_dir / "index.html").write_text(html, encoding="utf-8")
+    print(f"\n  Wrote dist/index.html ({len(html):,} bytes, {len(swipe_repos)} repos)")
 
 
 if __name__ == "__main__":
