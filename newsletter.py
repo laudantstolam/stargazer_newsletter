@@ -1,7 +1,11 @@
 import os
 import pathlib
+import json
 import requests
 from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from insights import generate_insights
 from template import generate_html
@@ -283,8 +287,24 @@ def main():
     # --- Swipe UI generation ---
     print("\n--- Generating Swipe UI ---")
 
+    # Check if pre-generated insights exist (from parallel jobs)
+    pre_generated_insights = {}
+    insights_dir = pathlib.Path("temp/insights")
+    if insights_dir.exists():
+        print("  Loading pre-generated insights from parallel jobs...")
+        for chunk_file in insights_dir.glob("chunk_*.json"):
+            with open(chunk_file, 'r', encoding='utf-8') as f:
+                chunk_data = json.load(f)
+                for repo in chunk_data:
+                    if repo.get("insight"):
+                        pre_generated_insights[repo["name"]] = repo["insight"]
+        print(f"  Loaded {len(pre_generated_insights)} pre-generated insights")
+
     # Build repo data for the swipe page (all unique repos from network stars)
     swipe_repos = []
+    readme_dir = pathlib.Path("dist/readmes")
+    readme_dir.mkdir(exist_ok=True)
+
     for repo_name, users in repo_star_count.items():
         meta = get_repo_metadata(repo_name)
         if not meta:
@@ -293,22 +313,32 @@ def main():
         print(f"  Fetching README: {repo_name}")
         readme_html = get_repo_readme(repo_name)
 
+        # Save README to separate file for dynamic loading
+        safe_repo_name = repo_name.replace("/", "_")
+        readme_file = readme_dir / f"{safe_repo_name}.html"
+        readme_file.write_text(readme_html, encoding="utf-8")
+
+        # Use pre-generated insight if available, otherwise None
+        insight = pre_generated_insights.get(repo_name)
+
         swipe_repos.append({
             "name": repo_name,
             "description": meta.get("description") or "",
-            "topics": (meta.get("topics") or [])[:3],
+            "topics": (meta.get("topics") or "")[:3],
             "stars": meta.get("stargazers_count", 0),
             "network_users": users,
-            "readme_html": readme_html,
-            "insight": None,  # filled in next step
+            "readme_url": f"readmes/{safe_repo_name}.html",  # Store URL instead of HTML
+            "insight": insight,
         })
 
-    # Generate insights (DeepWiki → LLM → none)
-    if swipe_repos:
-        print(f"\n  Generating insights for {len(swipe_repos)} repos...")
-        insights = generate_insights(swipe_repos)
+    # Generate insights only for repos without pre-generated ones
+    repos_needing_insights = [r for r in swipe_repos if r["insight"] is None]
+    if repos_needing_insights:
+        print(f"\n  Generating insights for {len(repos_needing_insights)} remaining repos...")
+        insights = generate_insights(repos_needing_insights)
         for repo in swipe_repos:
-            repo["insight"] = insights.get(repo["name"])
+            if repo["insight"] is None:
+                repo["insight"] = insights.get(repo["name"])
 
     # Write dist/index.html
     dist_dir = pathlib.Path("dist")

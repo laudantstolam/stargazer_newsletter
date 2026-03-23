@@ -2,26 +2,14 @@ import os
 import re
 import json
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 def fetch_deepwiki_insight(repo):
-    """Try to get insight from DeepWiki. Returns insight string or None."""
+    """Try to get insight from DeepWiki by scraping the page. Returns insight string or None."""
     owner, name = repo.split("/", 1)
 
-    # Try API first
-    try:
-        r = requests.get(
-            f"https://api.deepwiki.com/v1/repos/{owner}/{name}/summary",
-            timeout=10
-        )
-        if r.status_code == 200:
-            data = r.json()
-            summary = data.get("summary") or data.get("description") or ""
-            if summary:
-                return summary.strip()
-    except Exception:
-        pass
-
-    # Fallback: scrape HTML page for intro
     try:
         r = requests.get(
             f"https://deepwiki.com/{owner}/{name}",
@@ -30,9 +18,90 @@ def fetch_deepwiki_insight(repo):
         )
         if r.status_code == 200 and r.text:
             text = r.text
+
+            # Check if repository is not indexed
+            if re.search(r'repository\s+not\s+indexed', text, re.IGNORECASE):
+                return None
+
             match = re.search(r'<meta[^>]*property="og:description"[^>]*content="([^"]*)"', text)
-            if match and match.group(1):
-                return match.group(1).strip()
+            if not match or not match.group(1):
+                return None
+
+            description = match.group(1).strip()
+
+            # Case 1: False positive - generic DeepWiki message
+            if description.startswith("DeepWiki provides up-to-date documentation you can talk to, for"):
+                return None
+
+            # Case 2: Document-style description - try to extract "### What is [repo]" section
+            if description.startswith("This document") or description.startswith("This page"):
+                # Try multiple variations of "What is" section
+                what_is_patterns = [
+                    r'###\s*What\s+is\s*' + re.escape(name) + r'\s*\n*(.+?)(?:\n###|\n##|$)',
+                    r'###\s*What\s+is\s*the\s*' + re.escape(name) + r'\s*\n*(.+?)(?:\n###|\n##|$)',
+                    r'###\s*What\s+is\s*' + re.escape(owner) + r'\s*\n*(.+?)(?:\n###|\n##|$)',
+                    r'###\s*What\s+is\s*the\s*' + re.escape(owner) + r'\s*\n*(.+?)(?:\n###|\n##|$)',
+                    r'###\s*What\s+is\s+[A-Z]\w+\s*\n*(.+?)(?:\n###|\n##|$)',  # Generic "What is X"
+                ]
+
+                for pattern in what_is_patterns:
+                    what_is_match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+                    if what_is_match:
+                        what_is_content = what_is_match.group(1).strip()
+                        # Clean up HTML tags and extract first paragraph
+                        what_is_content = re.sub(r'<[^>]+>', ' ', what_is_content)
+                        # Handle literal \n, \t escape sequences
+                        what_is_content = what_is_content.replace('\\n', ' ').replace('\\t', ' ')
+                        what_is_content = re.sub(r'\s+', ' ', what_is_content).strip()
+                        # Get first sentence/paragraph
+                        first_sentence = re.split(r'[.!?]', what_is_content)[0].strip()
+
+                        # Filter out specific features that are not about the project itself
+                        # Skip if it's about a specific technical concept or feature
+                        skip_patterns = [
+                            r'^(the\s+)?process\s+of',
+                            r'^(a\s+)?technique\s+for',
+                            r'^(an\s+)?algorithm\s+that',
+                            r'^(a\s+)?method\s+to',
+                            r'^(the\s+)?act\s+of',
+                            r'^inline',  # Skip inlining-related content
+                            r'^inlining',
+                        ]
+
+                        matched = False
+                        for p in skip_patterns:
+                            if re.match(p, first_sentence.lower().lstrip()):
+                                matched = True
+                                break
+
+                        if len(first_sentence) > 20 and not matched:
+                            return first_sentence + "."
+
+                # Fallback to pattern matching if "What is" section not found
+                # Pattern 1: "[repo] is a [description]" (e.g., "VMkatz is a forensic credential extraction tool")
+                purpose_match = re.search(rf'{re.escape(name)}\s+is\s+(.+?)(?:\.|,|that|which|and|with)', description, re.IGNORECASE)
+                if purpose_match:
+                    result = purpose_match.group(1).strip()
+                    # Filter out useless document-style phrases
+                    useless = ['repository at', 'repository structure', 'architecture', 'overview', 'introduction', 'components']
+                    if not any(u in result.lower() for u in useless):
+                        return result + "."
+
+                # Pattern 2: "explaining its purpose as a [description]" (e.g., "explaining its purpose as a JavaScript library")
+                purpose_as_match = re.search(r'explaining its purpose as\s+(.+?)(?:\.|,|and|providing)', description, re.IGNORECASE)
+                if purpose_as_match:
+                    result = purpose_as_match.group(1).strip()
+                    # Filter out useless document-style phrases
+                    useless = ['repository at', 'repository structure', 'architecture', 'overview', 'introduction', 'components']
+                    if not any(u in result.lower() for u in useless):
+                        return result + "."
+
+                # If no good pattern found, return None as this is not a useful insight
+                return None
+
+            # Case 3: Good description - use as is
+            return description
+
     except Exception:
         pass
 
