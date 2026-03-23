@@ -152,6 +152,21 @@ TEMPLATE = r"""<!DOCTYPE html>
     display: flex; align-items: center; justify-content: center;
     height: 100%; color: var(--text-secondary); font-size: 14px;
   }
+  .readme-loading {
+    display: flex; align-items: center; justify-content: center;
+    height: 100%; color: var(--text-secondary); font-size: 14px;
+    gap: 8px;
+  }
+  .readme-loading-spinner {
+    width: 20px; height: 20px;
+    border: 2px solid var(--surface);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
 
   /* Card animation */
   .card-wrapper {
@@ -162,6 +177,60 @@ TEMPLATE = r"""<!DOCTYPE html>
   }
   .card-wrapper.swipe-right {
     transform: translateX(120%); opacity: 0;
+  }
+
+  /* Unstar effect */
+  .unstar-effect {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1000;
+    pointer-events: none;
+    opacity: 0;
+  }
+  .unstar-effect.active {
+    opacity: 1;
+  }
+  .star-container {
+    position: relative;
+    width: 80px;
+    height: 80px;
+  }
+  .star {
+    position: absolute;
+    font-size: 64px;
+    top: 0;
+    left: 0;
+    color: #fbbf24;
+  }
+  .star.left {
+    clip-path: inset(0 50% 0 0);
+    animation: breakLeft 0.6s cubic-bezier(0.68, -0.55, 0.265, 1.55) forwards;
+  }
+  .star.right {
+    clip-path: inset(0 0 0 50%);
+    animation: breakRight 0.6s cubic-bezier(0.68, -0.55, 0.265, 1.55) forwards;
+  }
+  @keyframes breakLeft {
+    0% {
+      transform: translateX(0) rotate(0);
+      opacity: 1;
+    }
+    100% {
+      transform: translateX(-30px) translateY(60px) rotate(-35deg);
+      opacity: 0;
+    }
+  }
+  @keyframes breakRight {
+    0% {
+      transform: translateX(0) rotate(0);
+      opacity: 1;
+    }
+    100% {
+      transform: translateX(30px) translateY(60px) rotate(35deg);
+      opacity: 0;
+    }
   }
 
   /* Summary screen */
@@ -201,6 +270,13 @@ TEMPLATE = r"""<!DOCTYPE html>
 
 <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
 <div class="progress-text" id="progressText"></div>
+
+<div class="unstar-effect" id="unstarEffect">
+  <div class="star-container">
+    <span class="star left">⭐</span>
+    <span class="star right">⭐</span>
+  </div>
+</div>
 
 <div id="app"></div>
 
@@ -248,11 +324,18 @@ function render() {
           <button class="btn-like" onclick="swipe('right')" aria-label="Like"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M20 6L9 17l-5-5"/></svg></button>
         </div>
       </div>
-      <div class="readme-panel">
-        ${repo.readme_html
-          ? `<div class="markdown-body">${repo.readme_html}</div>`
-          : `<div class="readme-empty">No README available</div>`}
+      <div class="readme-panel" id="readmePanel">
+        <div class="readme-loading">
+          <div class="readme-loading-spinner"></div>
+          <span>Loading README...</span>
+        </div>
       </div>
+    </div>
+  `;
+
+  // Dynamically load README after rendering
+  loadReadme(repo.readme_url);
+}
     </div>
   `;
 }
@@ -267,10 +350,57 @@ function swipe(direction) {
     card.classList.add("swipe-right");
   } else {
     skipped.push(repo);
+    // Show unstar effect
+    const unstarEffect = document.getElementById("unstarEffect");
+    unstarEffect.classList.add("active");
+    setTimeout(() => {
+      unstarEffect.classList.remove("active");
+    }, 600);
     card.classList.add("swipe-left");
   }
 
   setTimeout(() => { currentIndex++; render(); }, 300);
+}
+
+// Cache for loaded READMEs to avoid duplicate requests
+const readmeCache = {};
+
+function loadReadme(url) {
+  if (!url) {
+    document.getElementById("readmePanel").innerHTML =
+      `<div class="readme-empty">No README available</div>`;
+    return;
+  }
+
+  // Check cache first
+  if (readmeCache[url]) {
+    document.getElementById("readmePanel").innerHTML =
+      `<div class="markdown-body">${readmeCache[url]}</div>`;
+    return;
+  }
+
+  // Fetch README
+  fetch(url)
+    .then(response => {
+      if (!response.ok) throw new Error("Failed to load README");
+      return response.text();
+    })
+    .then(html => {
+      // Cache the result
+      readmeCache[url] = html;
+      // Update the panel if we're still on the same repo
+      if (currentIndex < REPOS.length && REPOS[currentIndex].readme_url === url) {
+        document.getElementById("readmePanel").innerHTML =
+          `<div class="markdown-body">${html}</div>`;
+      }
+    })
+    .catch(error => {
+      console.error("Error loading README:", error);
+      if (currentIndex < REPOS.length && REPOS[currentIndex].readme_url === url) {
+        document.getElementById("readmePanel").innerHTML =
+          `<div class="readme-empty">Failed to load README</div>`;
+      }
+    });
 }
 
 function renderSummary() {
