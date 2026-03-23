@@ -12,21 +12,221 @@ permissions:
   id-token: write
 
 jobs:
-  newsletter:
+  fetch-data:
+    runs-on: ubuntu-latest
+    outputs:
+      repo-count: ${{ steps.count.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Fetch repos and READMEs
+        run: |
+          uv run python -c "
+          import os
+          import pathlib
+          import requests
+          import json
+          from datetime import datetime, timedelta, timezone
+          from dotenv import load_dotenv
+          load_dotenv()
+
+          TOKEN = os.getenv('GITHUB_TOKEN')
+          DAYS = int(os.getenv('DAYS', 7))
+          HEADERS = {'Authorization': f'Bearer {TOKEN}', 'Accept': 'application/vnd.github+json'}
+          BASE_URL = 'https://api.github.com'
+          ISSUE_REPO = os.getenv('GITHUB_REPOSITORY')
+
+          def get_current_user():
+              return requests.get(f'{BASE_URL}/user', headers=HEADERS).json()['login']
+
+          def get_following():
+              users = []
+              page = 1
+              while True:
+                  r = requests.get(f'{BASE_URL}/user/following', headers=HEADERS, params={'per_page': 100, 'page': page})
+                  data = r.json()
+                  if not data: break
+                  users.extend([u['login'] for u in data])
+                  page += 1
+              return users
+
+          def get_repo_metadata(repo):
+              r = requests.get(f'{BASE_URL}/repos/{repo}', headers=HEADERS)
+              if r.status_code != 200: return None
+              return r.json()
+
+          def get_repo_readme(repo):
+              r = requests.get(f'{BASE_URL}/repos/{repo}/readme', headers={**HEADERS, 'Accept': 'application/vnd.github.html'})
+              if r.status_code != 200: return ''
+              html = r.text
+              if len(html) > 50000: html = html[:50000] + '<!-- truncated -->'
+              return html
+
+          def get_user_star_events(username, cutoff_time):
+              stars = []
+              page = 1
+              while True:
+                  r = requests.get(f'{BASE_URL}/users/{username}/starred', headers={**HEADERS, 'Accept': 'application/vnd.github.star+json'},
+                                 params={'per_page': 100, 'page': page, 'sort': 'created', 'direction': 'desc'})
+                  if r.status_code != 200: break
+                  data = r.json()
+                  if not data: break
+                  for item in data:
+                      starred_at = datetime.strptime(item['starred_at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+                      if starred_at < cutoff_time: return stars
+                      stars.append({'user': username, 'repo': item['repo']['full_name'], 'time': starred_at})
+                  page += 1
+              return stars
+
+          username = get_current_user()
+          following = get_following()
+          cutoff_time = datetime.now(timezone.utc) - timedelta(days=DAYS)
+
+          repo_star_count = {}
+          for user in following:
+              stars = get_user_star_events(user, cutoff_time)
+              for star in stars:
+                  repo_star_count.setdefault(star['repo'], []).append(star['user'])
+
+          repos_data = []
+          for repo_name, users in repo_star_count.items():
+              meta = get_repo_metadata(repo_name)
+              if not meta: continue
+              readme_html = get_repo_readme(repo_name)
+              repos_data.append({
+                  'name': repo_name,
+                  'description': meta.get('description', ''),
+                  'topics': (meta.get('topics', [])[:3]),
+                  'stars': meta.get('stargazers_count', 0),
+                  'network_users': users,
+                  'readme_html': readme_html,
+                  'insight': None
+              })
+
+          pathlib.Path('temp').mkdir(exist_ok=True)
+          with open('temp/repos_data.json', 'w', encoding='utf-8') as f:
+              json.dump(repos_data, f, ensure_ascii=False)
+          print(f'Fetched {len(repos_data)} repos')
+          "
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          DAYS: 7
+
+      - name: Count repos
+        id: count
+        run: echo "count=$(python -c 'import json; print(len(json.load(open(\"temp/repos_data.json\"))))')" >> $GITHUB_OUTPUT
+
+      - name: Upload repos data
+        uses: actions/upload-artifact@v4
+        with:
+          name: repos-data
+          path: temp/repos_data.json
+          retention-days: 1
+
+  generate-insights:
+    needs: fetch-data
+    runs-on: ubuntu-latest
+    if: needs.fetch-data.outputs.repo-count > 0
+    strategy:
+      matrix:
+        chunk: [0, 1, 2, 3]
+      max-parallel: 4
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Download repos data
+        uses: actions/download-artifact@v4
+        with:
+          name: repos-data
+          path: temp
+
+      - name: Generate insights for chunk ${{ matrix.chunk }}
+        run: |
+          uv run python -c "
+          import json
+          import os
+          from dotenv import load_dotenv
+          load_dotenv()
+
+          # Load repos data
+          with open('temp/repos_data.json', 'r', encoding='utf-8') as f:
+              all_repos = json.load(f)
+
+          # Split into chunks (4 chunks for 4 parallel jobs)
+          chunk_size = (len(all_repos) + 3) // 4
+          chunk_index = int(os.getenv('CHUNK_INDEX'))
+          start = chunk_index * chunk_size
+          end = min(start + chunk_size, len(all_repos))
+          repos_chunk = all_repos[start:end]
+
+          print(f'Processing chunk {chunk_index}: {len(repos_chunk)} repos (indices {start}-{end})')
+
+          # Import and use insights module
+          import sys
+          sys.path.insert(0, '.')
+          from insights import generate_insights
+
+          # Generate insights for this chunk
+          insights = generate_insights(repos_chunk)
+
+          # Update repos with insights
+          for repo in repos_chunk:
+              repo['insight'] = insights.get(repo['name'])
+
+          # Save this chunk's results
+          pathlib.Path('temp/insights').mkdir(exist_ok=True)
+          with open(f'temp/insights/chunk_{chunk_index}.json', 'w', encoding='utf-8') as f:
+              json.dump(repos_chunk, f, ensure_ascii=False)
+
+          print(f'Generated insights for {len(insights)} repos')
+          "
+        env:
+          CHUNK_INDEX: ${{ matrix.chunk }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Upload insights chunk
+        uses: actions/upload-artifact@v4
+        with:
+          name: insights-chunk-${{ matrix.chunk }}
+          path: temp/insights/chunk_${{ matrix.chunk }}.json
+          retention-days: 1
+
+  build-and-deploy:
+    needs: [fetch-data, generate-insights]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4.2.2
-
       - uses: astral-sh/setup-uv@v5
 
-      - name: POST newsletter & generate swipe UI
+      - name: Download repos data
+        uses: actions/download-artifact@v4
+        with:
+          name: repos-data
+          path: temp
+
+      - name: Download all insights chunks
+        uses: actions/download-artifact@v4
+        with:
+          pattern: insights-chunk-*
+          path: temp/insights
+          merge-multiple: true
+
+      - name: Generate newsletter and swipe UI
         run: uv run python newsletter.py
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           DAYS: 7
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Upload generated index.html as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stargazer-swipe-ui
+          path: dist/index.html
+          retention-days: 30
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
