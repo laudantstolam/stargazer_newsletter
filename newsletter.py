@@ -82,38 +82,38 @@ def get_user_all_stars(username):
 
 def get_user_star_events(username, cutoff_time):
     stars = []
+    page = 1
 
-    for page in range(1, 11):
-
+    while True:
         r = requests.get(
-            f"{BASE_URL}/users/{username}/events",
-            headers=HEADERS,
-            params={"per_page": 30, "page": page}
+            f"{BASE_URL}/users/{username}/starred",
+            headers={**HEADERS, "Accept": "application/vnd.github.star+json"},
+            params={"per_page": 100, "page": page, "sort": "created", "direction": "desc"}
         )
 
-        events = r.json()
-
-        if not events:
+        if r.status_code != 200:
             break
 
-        for event in events:
+        data = r.json()
+        if not data:
+            break
 
-            if event["type"] != "WatchEvent":
-                continue
-
-            created_at = datetime.strptime(
-                event["created_at"],
+        for item in data:
+            starred_at = datetime.strptime(
+                item["starred_at"],
                 "%Y-%m-%dT%H:%M:%SZ"
             ).replace(tzinfo=timezone.utc)
 
-            if created_at < cutoff_time:
+            if starred_at < cutoff_time:
                 return stars
 
             stars.append({
                 "user": username,
-                "repo": event["repo"]["name"],
-                "time": created_at
+                "repo": item["repo"]["full_name"],
+                "time": starred_at
             })
+
+        page += 1
 
     return stars
 
