@@ -1,0 +1,32 @@
+name: StarGazer Weekly Newsletter
+
+on:
+  schedule:
+    # Every Monday at 9 AM UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  newsletter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests python-dotenv
+
+      - name: Generate and post newsletter
+        run: python scripts/newsletter.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_REPO: ${{ secrets.ISSUE_REPO }}
+          ISSUE_LABELS: ${{ secrets.ISSUE_LABELS }}
+          DAYS: 7
