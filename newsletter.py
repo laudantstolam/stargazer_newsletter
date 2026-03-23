@@ -1,9 +1,6 @@
 import os
 import requests
 from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
-
-load_dotenv()
 
 TOKEN = os.getenv("GITHUB_TOKEN")
 DAYS = int(os.getenv("DAYS", 7))
@@ -14,84 +11,27 @@ HEADERS = {
 }
 
 BASE_URL = "https://api.github.com"
+ISSUE_REPO = os.getenv("GITHUB_REPOSITORY")
 
-# GitHub issue configuration
-ISSUE_REPO = os.getenv("ISSUE_REPO")  # e.g., "username/newsletter"
-ISSUE_LABELS = os.getenv("ISSUE_LABELS", "newsletter")  # comma-separated
-
-
-def get_following():
-    """Fetch list of users you follow (handles pagination)."""
-    users = []
-    page = 1
-
-    while True:
-        url = f"{BASE_URL}/user/following"
-        params = {"per_page": 100, "page": page}
-
-        r = requests.get(url, headers=HEADERS, params=params)
-        r.raise_for_status()
-
-        data = r.json()
-        if not data:
-            break
-
-        users.extend([u["login"] for u in data])
-        page += 1
-
-    return users
-
+repo_cache = {}
 
 def get_current_user():
-    """Get current authenticated user."""
-    r = requests.get(f"{BASE_URL}/user", headers=HEADERS)
-    r.raise_for_status()
-    return r.json()
-
-
-def get_user_starred_this_week(username, cutoff_time):
-    """Get repos starred by user in the last N days."""
-    starred = []
-    page = 1
-
-    while True:
-        url = f"{BASE_URL}/users/{username}/starred"
-        params = {"per_page": 100, "page": page, "sort": "created"}
-
-        r = requests.get(url, headers=HEADERS, params=params)
-        if r.status_code != 200:
-            break
-
-        data = r.json()
-        if not data:
-            break
-
-        for repo in data:
-            # Check if this endpoint returns starred_at; if not, we can't filter by time
-            # The list endpoint doesn't return starred_at, so we'll get all and filter client-side
-            starred.append({
-                "name": repo["full_name"],
-                "stars": repo["stargazers_count"],
-                "description": repo["description"],
-                "topics": repo["topics"][:5] if repo["topics"] else []
-            })
-
-        page += 1
-
-    return starred
+    return requests.get(
+        f"{BASE_URL}/user",
+        headers=HEADERS
+    ).json()["login"]
 
 
 def get_following():
-    """Fetch list of users you follow (handles pagination)."""
     users = []
     page = 1
 
     while True:
-        url = f"{BASE_URL}/user/following"
-        params = {"per_page": 100, "page": page}
-
-        r = requests.get(url, headers=HEADERS, params=params)
-        r.raise_for_status()
+        r = requests.get(
+            f"{BASE_URL}/user/following",
+            headers=HEADERS,
+            params={"per_page": 100, "page": page}
+        )
 
         data = r.json()
         if not data:
@@ -103,19 +43,35 @@ def get_following():
     return users
 
 
+def get_repo_metadata(repo):
+    if repo in repo_cache:
+        return repo_cache[repo]
+
+    r = requests.get(
+        f"{BASE_URL}/repos/{repo}",
+        headers={
+            **HEADERS,
+            "Accept": "application/vnd.github+json"
+        }
+    )
+
+    if r.status_code != 200:
+        return None
+
+    repo_cache[repo] = r.json()
+    return repo_cache[repo]
+
+
 def get_user_star_events(username, cutoff_time):
-    """Fetch recent star events from a user."""
     stars = []
-    page = 1
 
-    while page <= 10:  # REST API limit (~300 events max)
-        url = f"{BASE_URL}/users/{username}/events"
-        params = {"per_page": 30, "page": page}
+    for page in range(1, 11):
 
-        r = requests.get(url, headers=HEADERS, params=params)
-
-        if r.status_code != 200:
-            break
+        r = requests.get(
+            f"{BASE_URL}/users/{username}/events",
+            headers=HEADERS,
+            params={"per_page": 30, "page": page}
+        )
 
         events = r.json()
 
@@ -123,6 +79,7 @@ def get_user_star_events(username, cutoff_time):
             break
 
         for event in events:
+
             if event["type"] != "WatchEvent":
                 continue
 
@@ -140,198 +97,132 @@ def get_user_star_events(username, cutoff_time):
                 "time": created_at
             })
 
-        page += 1
-
     return stars
 
 
-def get_user_star_events(username, cutoff_time):
-    """Fetch recent star events from a user."""
-    stars = []
-    page = 1
+def create_issue(title, body):
 
-    while page <= 10:  # REST API limit (~300 events max)
-        url = f"{BASE_URL}/users/{username}/events"
-        params = {"per_page": 30, "page": page}
-
-        r = requests.get(url, headers=HEADERS, params=params)
-
-        if r.status_code != 200:
-            break
-
-        events = r.json()
-
-        if not events:
-            break
-
-        for event in events:
-            if event["type"] != "WatchEvent":
-                continue
-
-            created_at = datetime.strptime(
-                event["created_at"],
-                "%Y-%m-%dT%H:%M:%SZ"
-            ).replace(tzinfo=timezone.utc)
-
-            if created_at < cutoff_time:
-                return stars
-
-            stars.append({
-                "user": username,
-                "repo": event["repo"]["name"],
-                "time": created_at
-            })
-
-        page += 1
-
-    return stars
-
-
-def create_github_issue(repo, title, body):
-    """Create an issue in a GitHub repository."""
-    if not repo:
-        print("Warning: ISSUE_REPO not configured. Cannot create issue.")
-        return False
-
-    url = f"{BASE_URL}/repos/{repo}/issues"
     payload = {
         "title": title,
         "body": body,
-        "labels": ISSUE_LABELS.split(",") if ISSUE_LABELS else []
+        "labels": ["newsletter"]
     }
 
-    r = requests.post(url, headers=HEADERS, json=payload)
+    r = requests.post(
+        f"{BASE_URL}/repos/{ISSUE_REPO}/issues",
+        headers=HEADERS,
+        json=payload
+    )
 
     if r.status_code == 201:
-        issue = r.json()
-        print(f"Issue created: {issue['html_url']}")
-        return True
+        print("Issue created:", r.json()["html_url"])
     else:
-        print(f"Failed to create issue: {r.status_code} {r.text}")
-        return False
+        print("Issue creation failed:", r.text)
 
 
 def main():
-    print("=== StarGazer Newsletter Generator ===\n")
 
-    # Get current user
-    print("1. Getting current user...")
-    current_user = get_current_user()
-    username = current_user["login"]
-    print(f"   Logged in as: {username}\n")
+    username = get_current_user()
 
-    # Get user's starred repos
-    print("2. Fetching your starred repositories...")
-    user_starred = get_user_starred_this_week(username, None)
-    user_starred_names = {r["name"] for r in user_starred}
-    print(f"   Total starred: {len(user_starred)}\n")
-
-    # Get following list
-    print("3. Fetching your following list...")
     following = get_following()
-    print(f"   You follow {len(following)} users\n")
 
-    # Get star activity from following
-    print("4. Fetching star activity from your following...")
     cutoff_time = datetime.now(timezone.utc) - timedelta(days=DAYS)
 
     all_stars = []
-    repo_star_count = {}  # Track which repos are starred by following
+    repo_star_count = {}
+    topic_counter = {}
+    weak_signal = []
 
     for user in following:
-        print(f"   Checking {user}...", end=" ", flush=True)
+
         stars = get_user_star_events(user, cutoff_time)
-        all_stars.extend(stars)
 
-        # Count stars per repo
         for star in stars:
-            repo_name = star["repo"]
-            if repo_name not in repo_star_count:
-                repo_star_count[repo_name] = []
-            repo_star_count[repo_name].append(user)
 
-        print(f"({len(stars)} stars)")
+            repo = star["repo"]
 
-    all_stars.sort(key=lambda x: x["time"], reverse=True)
+            all_stars.append(star)
 
-    # Find trending repos (most starred among following)
-    trending_repos = sorted(
+            repo_star_count.setdefault(repo, []).append(user)
+
+    for repo, users in repo_star_count.items():
+
+        meta = get_repo_metadata(repo)
+
+        if not meta:
+            continue
+
+        topics = meta.get("topics", [])
+
+        for t in topics:
+            topic_counter[t] = topic_counter.get(t, 0) + 1
+
+        if meta["stargazers_count"] < 200 and len(users) >= 2:
+            weak_signal.append((repo, users))
+
+    trending_network = sorted(
         repo_star_count.items(),
         key=lambda x: len(x[1]),
         reverse=True
     )[:10]
 
-    # Find shared repos (starred by both user and following)
-    shared_repos = []
-    for repo_name, users in repo_star_count.items():
-        if repo_name in user_starred_names:
-            shared_repos.append({
-                "name": repo_name,
-                "starred_by_following": len(users),
-                "users": users
-            })
+    trending_topics = sorted(
+        topic_counter.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )[:5]
 
-    shared_repos.sort(key=lambda x: x["starred_by_following"], reverse=True)
+    shared_repos = [
+        r for r, users in repo_star_count.items()
+        if username in users
+    ]
 
-    # Build markdown newsletter
-    print("\n5. Building newsletter...\n")
+    weak_signal.sort(
+        key=lambda x: len(x[1]),
+        reverse=True
+    )
 
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    all_stars.sort(
+        key=lambda x: x["time"],
+        reverse=True
+    )
 
-    body = f"""# 🌟 StarGazer Weekly Newsletter
-Generated on {date_str}
+    today = datetime.utcnow().strftime("%Y-%m-%d")
 
-## 📊 Your Activity
-- **Total starred repos:** {len(user_starred)}
-- **Following:** {len(following)} users
-- **Recent activity period:** Last {DAYS} days
+    body = f"# 🌟 StarGazer Weekly Newsletter\nGenerated {today}\n\n"
 
-## 🔥 Trending Repos (Most starred by your following)
-"""
+    body += "## 🔥 Trending by network\n"
 
-    if trending_repos:
-        for i, (repo_name, users) in enumerate(trending_repos, 1):
-            starred_count = len(users)
-            body += f"\n{i}. **[{repo_name}](https://github.com/{repo_name})** ⭐ ({starred_count} by: {', '.join(users[:3])}{'...' if len(users) > 3 else ''})"
-    else:
-        body += "\nNo trending repos this week."
+    for repo, users in trending_network:
+        body += f"- [{repo}](https://github.com/{repo}) ({len(users)} stars)\n"
 
-    body += f"""
+    body += "\n## 🔥 Trending by topic\n"
 
-## 🤝 Repos You Share with Your Following
-Found {len(shared_repos)} repo(s) you both starred:
-"""
+    for topic, count in trending_topics:
+        body += f"- `{topic}` ({count})\n"
+
+    body += "\n## 🤝 Shared-interest repos\n"
 
     if shared_repos:
-        for i, repo in enumerate(shared_repos, 1):
-            body += f"\n- **[{repo['name']}](https://github.com/{repo['name']})** — Starred by {repo['starred_by_following']} of your following: {', '.join(repo['users'])}"
+        for repo in shared_repos[:10]:
+            body += f"- [{repo}](https://github.com/{repo})\n"
     else:
-        body += "\nNo shared repos yet."
+        body += "None\n"
 
-    body += f"""
+    body += "\n## 🧪 Weak-signal discovery repos\n"
 
-## 👥 Recent Star Activity (Top 20)
-"""
+    for repo, users in weak_signal[:10]:
+        body += f"- [{repo}](https://github.com/{repo}) ({len(users)} insiders)\n"
 
-    if all_stars:
-        for star in all_stars[:20]:
-            body += f"\n- {star['time'].strftime('%Y-%m-%d %H:%M')} — **{star['user']}** ⭐ [{star['repo']}](https://github.com/{star['repo']})"
-        if len(all_stars) > 20:
-            body += f"\n\n... and {len(all_stars) - 20} more activities"
-    else:
-        body += "\nNo recent activity."
+    body += "\n## 👥 Recent activity\n"
 
-    body += "\n\n---\n*Generated by StarGazer Newsletter*"
+    for star in all_stars[:20]:
+        body += f"- {star['user']} ⭐ [{star['repo']}](https://github.com/{star['repo']})\n"
 
-    # Create GitHub issue
-    print("6. Creating GitHub issue...")
-    title = f"📰 StarGazer Newsletter — {date_str}"
-
-    if create_github_issue(ISSUE_REPO, title, body):
-        print("Newsletter created successfully!")
-    else:
-        print("Failed to create issue. Printing content:")
-        print(body)
+    create_issue(
+        f"📰 StarGazer Newsletter — {today}",
+        body
+    )
 
 
 if __name__ == "__main__":
