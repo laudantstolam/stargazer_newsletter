@@ -152,21 +152,6 @@ TEMPLATE = r"""<!DOCTYPE html>
     display: flex; align-items: center; justify-content: center;
     height: 100%; color: var(--text-secondary); font-size: 14px;
   }
-  .readme-loading {
-    display: flex; align-items: center; justify-content: center;
-    height: 100%; color: var(--text-secondary); font-size: 14px;
-    gap: 8px;
-  }
-  .readme-loading-spinner {
-    width: 20px; height: 20px;
-    border: 2px solid var(--surface);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
 
   /* Card animation */
   .card-wrapper {
@@ -324,18 +309,11 @@ function render() {
           <button class="btn-like" onclick="swipe('right')" aria-label="Like"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M20 6L9 17l-5-5"/></svg></button>
         </div>
       </div>
-      <div class="readme-panel" id="readmePanel">
-        <div class="readme-loading">
-          <div class="readme-loading-spinner"></div>
-          <span>Loading README...</span>
-        </div>
+      <div class="readme-panel">
+        ${repo.readme_html
+          ? `<div class="markdown-body">${repo.readme_html}</div>`
+          : `<div class="readme-empty">No README available</div>`}
       </div>
-    </div>
-  `;
-
-  // Dynamically load README after rendering
-  loadReadme(repo.readme_url);
-}
     </div>
   `;
 }
@@ -360,47 +338,6 @@ function swipe(direction) {
   }
 
   setTimeout(() => { currentIndex++; render(); }, 300);
-}
-
-// Cache for loaded READMEs to avoid duplicate requests
-const readmeCache = {};
-
-function loadReadme(url) {
-  if (!url) {
-    document.getElementById("readmePanel").innerHTML =
-      `<div class="readme-empty">No README available</div>`;
-    return;
-  }
-
-  // Check cache first
-  if (readmeCache[url]) {
-    document.getElementById("readmePanel").innerHTML =
-      `<div class="markdown-body">${readmeCache[url]}</div>`;
-    return;
-  }
-
-  // Fetch README
-  fetch(url)
-    .then(response => {
-      if (!response.ok) throw new Error("Failed to load README");
-      return response.text();
-    })
-    .then(html => {
-      // Cache the result
-      readmeCache[url] = html;
-      // Update the panel if we're still on the same repo
-      if (currentIndex < REPOS.length && REPOS[currentIndex].readme_url === url) {
-        document.getElementById("readmePanel").innerHTML =
-          `<div class="markdown-body">${html}</div>`;
-      }
-    })
-    .catch(error => {
-      console.error("Error loading README:", error);
-      if (currentIndex < REPOS.length && REPOS[currentIndex].readme_url === url) {
-        document.getElementById("readmePanel").innerHTML =
-          `<div class="readme-empty">Failed to load README</div>`;
-      }
-    });
 }
 
 function renderSummary() {

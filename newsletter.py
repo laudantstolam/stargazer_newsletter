@@ -302,8 +302,6 @@ def main():
 
     # Build repo data for the swipe page (all unique repos from network stars)
     swipe_repos = []
-    readme_dir = pathlib.Path("dist/readmes")
-    readme_dir.mkdir(exist_ok=True)
 
     for repo_name, users in repo_star_count.items():
         meta = get_repo_metadata(repo_name)
@@ -312,11 +310,6 @@ def main():
 
         print(f"  Fetching README: {repo_name}")
         readme_html = get_repo_readme(repo_name)
-
-        # Save README to separate file for dynamic loading
-        safe_repo_name = repo_name.replace("/", "_")
-        readme_file = readme_dir / f"{safe_repo_name}.html"
-        readme_file.write_text(readme_html, encoding="utf-8")
 
         # Use pre-generated insight if available, otherwise None
         insight = pre_generated_insights.get(repo_name)
@@ -327,7 +320,7 @@ def main():
             "topics": (meta.get("topics") or "")[:3],
             "stars": meta.get("stargazers_count", 0),
             "network_users": users,
-            "readme_url": f"readmes/{safe_repo_name}.html",  # Store URL instead of HTML
+            "readme_html": readme_html,
             "insight": insight,
         })
 
