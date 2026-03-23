@@ -1,5 +1,18 @@
-### TLDR of newsletter.py:
-  1. Gets your GitHub following list
-  2. Fetches star events from each followed user (last 7 days)
-  3. Finds trending repos (most starred by your following) + repos you both starred
-  4. Posts a markdown summary as a GitHub Issue  
+### Usage
+1. fork current repo
+2. add GH_PAT in repo secret with granted the `user:read`, `user:following` permissoin
+3. Trigger in action or wait for cron job works
+
+### Defaults
+- Triggers
+```
+on:
+  schedule:
+    - cron: '0 9 * * 1' (Monday 9:00 AM)
+  workflow_dispatch: (Manual Trigger)
+```
+
+it follows:`<minutes> <hours> <day> <month> <day in the week>`, `*` means all
+
+### Format
+see samples in my [issue](https://github.com/laudantstolam/stargazer_newsletter/issues)

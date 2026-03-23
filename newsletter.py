@@ -62,6 +62,24 @@ def get_repo_metadata(repo):
     return repo_cache[repo]
 
 
+def get_user_all_stars(username):
+    starred = set()
+    page = 1
+    while True:
+        r = requests.get(
+            f"{BASE_URL}/users/{username}/starred",
+            headers=HEADERS,
+            params={"per_page": 100, "page": page}
+        )
+        data = r.json()
+        if not data:
+            break
+        for repo in data:
+            starred.add(repo["full_name"])
+        page += 1
+    return starred
+
+
 def get_user_star_events(username, cutoff_time):
     stars = []
 
@@ -172,9 +190,11 @@ def main():
         reverse=True
     )[:5]
 
+    user_all_stars = get_user_all_stars(username)
+
     shared_repos = [
-        r for r, users in repo_star_count.items()
-        if username in users
+        r for r in repo_star_count
+        if r in user_all_stars
     ]
 
     weak_signal.sort(
@@ -217,7 +237,15 @@ def main():
     body += "\n## 👥 Recent activity\n"
 
     for star in all_stars[:20]:
-        body += f"- {star['user']} ⭐ [{star['repo']}](https://github.com/{star['repo']})\n"
+        meta = get_repo_metadata(star["repo"])
+        desc = (meta.get("description") or "") if meta else ""
+        topics = ((meta.get("topics") or [])[:3]) if meta else []
+        line = f"- {star['user']} ⭐ [{star['repo']}](https://github.com/{star['repo']})"
+        if desc:
+            line += f"\n  > {desc}"
+        if topics:
+            line += f"\n  `{'` `'.join(topics)}`"
+        body += line + "\n"
 
     create_issue(
         f"📰 StarGazer Newsletter — {today}",
