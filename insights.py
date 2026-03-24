@@ -7,7 +7,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def fetch_deepwiki_insight(repo):
-    """Try to get insight from DeepWiki by scraping the page. Returns insight string or None."""
+    """Try to get insight from DeepWiki. Returns insight string or None.
+
+    DeepWiki uses Next.js App Router with RSC streaming. The page source
+    contains wiki content in self.__next_f.push() chunks alongside meta tags.
+
+    Strategy (in priority order):
+      1. Extract "What is {name}" section from embedded RSC content
+      2. Parse og:description for direct descriptions
+      3. Return None if nothing useful found
+    """
     owner, name = repo.split("/", 1)
 
     try:
@@ -16,94 +25,134 @@ def fetch_deepwiki_insight(repo):
             timeout=10,
             headers={"User-Agent": "StarGazer-Newsletter/1.0"}
         )
-        if r.status_code == 200 and r.text:
-            text = r.text
+        if r.status_code != 200 or not r.text:
+            return None
 
-            # Check if repository is not indexed
-            if re.search(r'repository\s+not\s+indexed', text, re.IGNORECASE):
-                return None
+        html = r.text
 
-            match = re.search(r'<meta[^>]*property="og:description"[^>]*content="([^"]*)"', text)
-            if not match or not match.group(1):
-                return None
+        # Check if repository is not indexed
+        if re.search(r'repository\s+not\s+indexed', html, re.IGNORECASE):
+            return None
 
-            description = match.group(1).strip()
+        # Strategy 1: Extract "What is {name}" from server-rendered HTML
+        what_is = _extract_what_is_section(html, name)
+        if what_is:
+            return what_is
 
-            # Case 1: False positive - generic DeepWiki message
-            if description.startswith("DeepWiki provides up-to-date documentation you can talk to, for"):
-                return None
+        # Strategy 2: Fall back to og:description
+        match = re.search(
+            r'<meta[^>]*property="og:description"[^>]*content="([^"]*)"', html
+        )
+        if not match or not match.group(1).strip():
+            return None
 
-            # Case 2: Document-style description - try to extract "### What is [repo]" section
-            if description.startswith("This document") or description.startswith("This page"):
-                # Try multiple variations of "What is" section
-                what_is_patterns = [
-                    r'###\s*What\s+is\s*' + re.escape(name) + r'\s*\n*(.+?)(?:\n###|\n##|$)',
-                    r'###\s*What\s+is\s*the\s*' + re.escape(name) + r'\s*\n*(.+?)(?:\n###|\n##|$)',
-                    r'###\s*What\s+is\s*' + re.escape(owner) + r'\s*\n*(.+?)(?:\n###|\n##|$)',
-                    r'###\s*What\s+is\s*the\s*' + re.escape(owner) + r'\s*\n*(.+?)(?:\n###|\n##|$)',
-                    r'###\s*What\s+is\s+[A-Z]\w+\s*\n*(.+?)(?:\n###|\n##|$)',  # Generic "What is X"
-                ]
+        desc = match.group(1).strip()
 
-                for pattern in what_is_patterns:
-                    what_is_match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-                    if what_is_match:
-                        what_is_content = what_is_match.group(1).strip()
-                        # Clean up HTML tags and extract first paragraph
-                        what_is_content = re.sub(r'<[^>]+>', ' ', what_is_content)
-                        # Handle literal \n, \t escape sequences
-                        what_is_content = what_is_content.replace('\\n', ' ').replace('\\t', ' ')
-                        what_is_content = re.sub(r'\s+', ' ', what_is_content).strip()
-                        # Get first sentence/paragraph
-                        first_sentence = re.split(r'[.!?]', what_is_content)[0].strip()
+        # False positive — generic DeepWiki boilerplate
+        if "DeepWiki provides up-to-date documentation" in desc:
+            return None
 
-                        # Filter out specific features that are not about the project itself
-                        # Skip if it's about a specific technical concept or feature
-                        skip_patterns = [
-                            r'^(the\s+)?process\s+of',
-                            r'^(a\s+)?technique\s+for',
-                            r'^(an\s+)?algorithm\s+that',
-                            r'^(a\s+)?method\s+to',
-                            r'^(the\s+)?act\s+of',
-                            r'^inline',  # Skip inlining-related content
-                            r'^inlining',
-                        ]
+        # Document-style — try to extract purpose
+        if desc.startswith(("This document", "This page")):
+            return _extract_purpose_sentence(desc, name)
 
-                        matched = False
-                        for p in skip_patterns:
-                            if re.match(p, first_sentence.lower().lstrip()):
-                                matched = True
-                                break
-
-                        if len(first_sentence) > 20 and not matched:
-                            return first_sentence + "."
-
-                # Fallback to pattern matching if "What is" section not found
-                # Pattern 1: "[repo] is a [description]" (e.g., "VMkatz is a forensic credential extraction tool")
-                purpose_match = re.search(rf'{re.escape(name)}\s+is\s+(.+?)(?:\.|,|that|which|and|with)', description, re.IGNORECASE)
-                if purpose_match:
-                    result = purpose_match.group(1).strip()
-                    # Filter out useless document-style phrases
-                    useless = ['repository at', 'repository structure', 'architecture', 'overview', 'introduction', 'components']
-                    if not any(u in result.lower() for u in useless):
-                        return result + "."
-
-                # Pattern 2: "explaining its purpose as a [description]" (e.g., "explaining its purpose as a JavaScript library")
-                purpose_as_match = re.search(r'explaining its purpose as\s+(.+?)(?:\.|,|and|providing)', description, re.IGNORECASE)
-                if purpose_as_match:
-                    result = purpose_as_match.group(1).strip()
-                    # Filter out useless document-style phrases
-                    useless = ['repository at', 'repository structure', 'architecture', 'overview', 'introduction', 'components']
-                    if not any(u in result.lower() for u in useless):
-                        return result + "."
-
-                # If no good pattern found, return None as this is not a useful insight
-                return None
-
-            # Case 3: Good description - use as is
-            return description
+        # Direct description — use as-is (truncate if very long)
+        if len(desc) > 300:
+            truncated = desc[:300]
+            last_period = truncated.rfind(".")
+            if last_period > 100:
+                return truncated[:last_period + 1]
+            return truncated + "..."
+        return desc
 
     except Exception:
-        pass
+        return None
+
+
+def _extract_what_is_section(html, name):
+    """Extract the 'What is {name}' section from DeepWiki's server-rendered HTML.
+
+    DeepWiki server-renders wiki content as real HTML (headings, paragraphs).
+    We find the 'What is {name}' heading and grab the first <p> after it.
+    Returns cleaned paragraph text, or None.
+    """
+    # Find "What is {name}" heading — allow hyphens/spaces/case variations
+    # e.g. repo "deer-flow" matches heading "DeerFlow" or "Deer Flow" or "deer-flow"
+    flexible_name = re.escape(name).replace(r'\-', '[-\\s]?')
+    pattern = rf'What\s+is\s+{flexible_name}'
+    match = re.search(pattern, html, re.IGNORECASE)
+    if not match:
+        return None
+
+    after_heading = html[match.start():]
+
+    # Grab the first <p>...</p> after the heading
+    p_match = re.search(r'<p[^>]*>(.*?)</p>', after_heading, re.DOTALL)
+    if not p_match:
+        return None
+
+    # Strip HTML tags from paragraph content
+    para = re.sub(r'<[^>]+>', '', p_match.group(1))
+    para = re.sub(r'\s+', ' ', para).strip()
+
+    if not para or len(para) < 20:
+        return None
+
+    if len(para) > 300:
+        truncated = para[:300]
+        last_period = truncated.rfind(".")
+        if last_period > 100:
+            para = truncated[:last_period + 1]
+        else:
+            para = truncated + "..."
+
+    return para
+
+
+def _extract_purpose_sentence(desc, name):
+    """Extract the core purpose from a document-style og:description.
+
+    Tries multiple patterns in priority order:
+      1. "{name} is a/an ..." sentence
+      2. "introduces {name}...as a {description}" rewrite
+      3. "purpose as a {description}" fallback
+    Returns cleaned sentence or None.
+    """
+    esc = re.escape(name)
+
+    # Split into sentences (handle truncated last sentence)
+    sentences = re.split(r'(?<=[.!?])\s+', desc)
+
+    # Pattern 1: sentence containing "{name} is a/an ..."
+    for sent in sentences:
+        if re.search(rf'\b{esc}\b\s+is\s+', sent, re.IGNORECASE):
+            noise = ['repository at', 'repository structure', 'architecture overview',
+                     'introduction to', 'table of contents']
+            if any(n in sent.lower() for n in noise):
+                continue
+            sent = sent.strip().strip('`')
+            if not sent.endswith(('.', '!', '?')):
+                sent += "."
+            return sent
+
+    # Pattern 2: "introduces {name}...as a/an {description}" — rewrite to "{name} is a ..."
+    as_match = re.search(
+        rf'\b{esc}\b[^.]*?\bas\s+a(?:n)?\s+(.+?)(?:\.\s|$)',
+        desc, re.IGNORECASE
+    )
+    if as_match:
+        result = as_match.group(1).strip().rstrip('.')
+        if len(result) > 15:
+            return f"{name} is a {result}."
+
+    # Pattern 3: "purpose as a {description}"
+    purpose_as = re.search(
+        r'purpose as\s+(.+?)(?:\.|,|\sand\s)', desc, re.IGNORECASE
+    )
+    if purpose_as:
+        result = purpose_as.group(1).strip()
+        if len(result) > 15:
+            return result + "."
 
     return None
 

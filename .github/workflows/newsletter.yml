@@ -4,6 +4,16 @@ on:
   schedule:
     - cron: '0 9 * * 1'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'What to generate'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - newsletter
+          - swipe
 
 permissions:
   issues: write
@@ -20,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4.2.2
       - uses: astral-sh/setup-uv@v5
 
-      - name: Fetch repos and READMEs
+      - name: Fetch starred repos
         run: |
           uv run python -c "
           import os
@@ -35,7 +45,6 @@ jobs:
           DAYS = int(os.getenv('DAYS', 7))
           HEADERS = {'Authorization': f'Bearer {TOKEN}', 'Accept': 'application/vnd.github+json'}
           BASE_URL = 'https://api.github.com'
-          ISSUE_REPO = os.getenv('GITHUB_REPOSITORY')
 
           def get_current_user():
               return requests.get(f'{BASE_URL}/user', headers=HEADERS).json()['login']
@@ -55,13 +64,6 @@ jobs:
               r = requests.get(f'{BASE_URL}/repos/{repo}', headers=HEADERS)
               if r.status_code != 200: return None
               return r.json()
-
-          def get_repo_readme(repo):
-              r = requests.get(f'{BASE_URL}/repos/{repo}/readme', headers={**HEADERS, 'Accept': 'application/vnd.github.html'})
-              if r.status_code != 200: return ''
-              html = r.text
-              if len(html) > 50000: html = html[:50000] + '<!-- truncated -->'
-              return html
 
           def get_user_star_events(username, cutoff_time):
               stars = []
@@ -89,18 +91,29 @@ jobs:
               for star in stars:
                   repo_star_count.setdefault(star['repo'], []).append(star['user'])
 
+          # Get user's own stars for shared-interest detection
+          user_all_stars = set()
+          page = 1
+          while True:
+              r = requests.get(f'{BASE_URL}/users/{username}/starred', headers=HEADERS, params={'per_page': 100, 'page': page})
+              data = r.json()
+              if not data: break
+              for repo in data:
+                  user_all_stars.add(repo['full_name'])
+              page += 1
+
           repos_data = []
           for repo_name, users in repo_star_count.items():
               meta = get_repo_metadata(repo_name)
               if not meta: continue
-              readme_html = get_repo_readme(repo_name)
               repos_data.append({
                   'name': repo_name,
                   'description': meta.get('description', ''),
                   'topics': (meta.get('topics', [])[:3]),
                   'stars': meta.get('stargazers_count', 0),
                   'network_users': users,
-                  'readme_html': readme_html,
+                  'is_shared': repo_name in user_all_stars,
+                  'is_weak_signal': meta.get('stargazers_count', 0) < 200 and len(users) >= 2,
                   'insight': None
               })
 
@@ -115,7 +128,7 @@ jobs:
 
       - name: Count repos
         id: count
-        run: echo "count=$(python -c 'import json; print(len(json.load(open(\"temp/repos_data.json\"))))')" >> $GITHUB_OUTPUT
+        run: echo "count=$(uv run python -c 'import json; print(len(json.load(open("temp/repos_data.json"))))')" >> $GITHUB_OUTPUT
 
       - name: Upload repos data
         uses: actions/upload-artifact@v4
@@ -127,7 +140,7 @@ jobs:
   generate-insights:
     needs: fetch-data
     runs-on: ubuntu-latest
-    if: needs.fetch-data.outputs.repo-count > 0
+    if: needs.fetch-data.outputs.repo-count != '0' && (inputs.mode || 'both') != 'newsletter'
     strategy:
       matrix:
         chunk: [0, 1, 2, 3]
@@ -147,14 +160,13 @@ jobs:
           uv run python -c "
           import json
           import os
+          import pathlib
           from dotenv import load_dotenv
           load_dotenv()
 
-          # Load repos data
           with open('temp/repos_data.json', 'r', encoding='utf-8') as f:
               all_repos = json.load(f)
 
-          # Split into chunks (4 chunks for 4 parallel jobs)
           chunk_size = (len(all_repos) + 3) // 4
           chunk_index = int(os.getenv('CHUNK_INDEX'))
           start = chunk_index * chunk_size
@@ -163,20 +175,16 @@ jobs:
 
           print(f'Processing chunk {chunk_index}: {len(repos_chunk)} repos (indices {start}-{end})')
 
-          # Import and use insights module
           import sys
           sys.path.insert(0, '.')
           from insights import generate_insights
 
-          # Generate insights for this chunk
           insights = generate_insights(repos_chunk)
 
-          # Update repos with insights
           for repo in repos_chunk:
               repo['insight'] = insights.get(repo['name'])
 
-          # Save this chunk's results
-          pathlib.Path('temp/insights').mkdir(exist_ok=True)
+          pathlib.Path('temp/insights').mkdir(parents=True, exist_ok=True)
           with open(f'temp/insights/chunk_{chunk_index}.json', 'w', encoding='utf-8') as f:
               json.dump(repos_chunk, f, ensure_ascii=False)
 
@@ -195,8 +203,29 @@ jobs:
           path: temp/insights/chunk_${{ matrix.chunk }}.json
           retention-days: 1
 
-  build-and-deploy:
+  build-newsletter:
+    needs: fetch-data
+    if: (inputs.mode || 'both') != 'swipe'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Download repos data
+        uses: actions/download-artifact@v4
+        with:
+          name: repos-data
+          path: temp
+
+      - name: Generate newsletter issue
+        run: uv run python newsletter.py --newsletter-only
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          DAYS: 7
+
+  build-swipe:
     needs: [fetch-data, generate-insights]
+    if: (inputs.mode || 'both') != 'newsletter'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4.2.2
@@ -215,18 +244,11 @@ jobs:
           path: temp/insights
           merge-multiple: true
 
-      - name: Generate newsletter and swipe UI
-        run: uv run python newsletter.py
+      - name: Generate swipe UI
+        run: uv run python newsletter.py --swipe-only
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           DAYS: 7
-
-      - name: Upload generated index.html as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: stargazer-swipe-ui
-          path: dist/index.html
-          retention-days: 30
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
