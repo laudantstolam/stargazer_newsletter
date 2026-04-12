@@ -3,6 +3,8 @@
 Discover what your GitHub network is starring. Generates a weekly newsletter (GitHub Issue) and a swipe UI (GitHub Pages) to browse repos starred by people you follow.
 ![alt text](image.png)
 
+### [demo link](https://laudantstolam.github.io/stargazer_newsletter/)
+
 ## Setup
 
 1. Fork this repo
